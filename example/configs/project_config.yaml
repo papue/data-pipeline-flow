@@ -17,7 +17,11 @@ exclusions:
   - archival_folders
   - python_runtime
   paths: []
-  file_names: []
+  file_names:
+  - 00_build_all_data.do
+  - 00_run_analysis.do
+  - 00_run_robustness.do
+  - master.do
   exact_paths: []
   prefixes: []
   globs:
