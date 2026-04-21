@@ -1,0 +1,2 @@
+from data_pipeline_flow._check_install import warn_if_missing as _warn_if_missing
+_warn_if_missing()

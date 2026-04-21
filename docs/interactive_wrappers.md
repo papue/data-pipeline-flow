@@ -2,13 +2,19 @@
 
 These scripts are the easiest way to operate the project if you do not want to remember CLI commands.
 
-## Scripts
+## Commands
 
-- `setup_project.py`: first-run setup and saved defaults
-- `make_pipeline.py`: render a PNG, SVG, PDF, or DOT using saved defaults
-- `inspect_pipeline.py`: run summary, validate, or both
-- `edit_exclusions.py`: manage ignored paths, names, and glob patterns
-- `manage_clusters.py`: manage manual clusters
+After installation, each helper is available as a CLI command directly on PATH:
+
+| CLI command | Root script equivalent | What it does |
+|---|---|---|
+| `data-pipeline-flow-setup` | `python setup_project.py` | First-run setup and saved defaults |
+| `data-pipeline-flow-make` | `python make_pipeline.py` | Render a PNG, SVG, PDF, or DOT using saved defaults |
+| `data-pipeline-flow-inspect` | `python inspect_pipeline.py` | Run summary, validate, or both |
+| `data-pipeline-flow-edit-exclusions` | `python edit_exclusions.py` | Manage ignored paths, names, and glob patterns |
+| `data-pipeline-flow-manage-clusters` | `python manage_clusters.py` | Manage manual clusters |
+
+Both forms work. The CLI commands work from any directory; the root scripts require you to be in the repo root.
 
 ## What gets remembered
 

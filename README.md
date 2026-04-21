@@ -47,19 +47,20 @@ If you are new, start with `example/`.
 
 ## Easiest way to use this project
 
-If you do not want to remember CLI commands, use the helper scripts in the repository root.
+If you do not want to remember CLI commands, use the interactive helpers.
 They ask questions, explain the available values, and save your choices so you do not need to repeat them every time.
 
-The main helper scripts are:
+After installation the following commands are available directly:
 
-- `python setup_project.py` -> first-run setup; choose project root, output folder, theme, view, and default format
-  - during setup you can paste repo-relative paths or absolute paths; for the config location, giving a folder is allowed and `project_config.yaml` will be created inside it
-- `python make_pipeline.py` -> create the pipeline figure using your saved defaults
-- `python inspect_pipeline.py` -> run `summary`, `validate`, or both
-- `python edit_exclusions.py` -> add or remove ignored files, folders, and glob patterns
-- `python manage_clusters.py` -> add, edit, or delete manual clusters
+| Command | What it does |
+|---|---|
+| `data-pipeline-flow-setup` | First-run setup: choose project root, output folder, theme, view, and format |
+| `data-pipeline-flow-make` | Render the pipeline figure using your saved defaults |
+| `data-pipeline-flow-inspect` | Run `summary`, `validate`, or both |
+| `data-pipeline-flow-edit-exclusions` | Add or remove ignored files, folders, and glob patterns |
+| `data-pipeline-flow-manage-clusters` | Add, edit, or delete manual clusters |
 
-The helper scripts call the same underlying engine as the CLI, but they are meant to be the friendlier starting point.
+You can also run the equivalent root-level Python scripts directly (`python setup_project.py` etc.) — they do the same thing and are still available.
 
 They save their remembered choices in:
 
@@ -79,65 +80,46 @@ You can still change answers later. The scripts will show the saved values first
 
 ## Recommended beginner workflow
 
-### Windows PowerShell
+```bash
+python install.py
+```
+
+That single command creates the virtual environment, installs the package, checks Graphviz, and runs a smoke test. It works on Windows, macOS, and Linux.
+
+After it finishes, activate the virtual environment once for your session:
 
 ```powershell
-cd "D:\path\to\pubrepo"
-py -3.11 -m venv .venv
+# Windows
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-python setup_project.py
-python make_pipeline.py
 ```
-
-### macOS / Linux
 
 ```bash
-cd /path/to/pubrepo
-python3 -m venv .venv
+# macOS / Linux
 . .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-python setup_project.py
-python make_pipeline.py
 ```
 
-If you prefer the direct CLI, it is still available, but the helper scripts are now the recommended path for normal use.
+Then use the interactive helpers to get started:
+
+```bash
+data-pipeline-flow-setup    # first-run setup: choose project root, theme, output folder
+data-pipeline-flow-make     # render the pipeline image using your saved settings
+```
 
 ---
 
 ## 5-minute quick start
 
-### Windows PowerShell
-
-```powershell
-cd "D:\path\to\pubrepo"
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-data-pipeline-flow summary --project-root example/project
+```bash
+python install.py
 ```
 
-If PowerShell blocks activation, run this once in the current terminal and then activate again:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-### macOS / Linux
+Once that finishes, activate the venv and verify everything works:
 
 ```bash
-cd /path/to/pubrepo
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
 data-pipeline-flow summary --project-root example/project
 ```
 
-If the `summary` command works, the installation is fine.
+If `summary` prints node/edge counts, the installation is complete.
 
 ---
 
@@ -347,6 +329,8 @@ Lets you manually override cluster membership. Supports two types:
 
 ## PNG / SVG export and Graphviz
 
+`python install.py` checks for Graphviz automatically and warns you if it is missing. If you skipped `install.py`, check manually with `dot -V` in your terminal.
+
 The tool can create image files such as PNG, SVG, and PDF through the `render-image` command.
 
 Example:
@@ -441,16 +425,19 @@ Use:
 .\.venv\Scripts\Activate.ps1
 ```
 
+If PowerShell blocks this, run once and retry:
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
 ### `Package requires a different Python: 3.9.x not in >=3.10`
 Your virtual environment was created with too old a Python.
 
-Delete `.venv` and recreate it with Python 3.10+.
-For example:
+Delete `.venv` and rerun `install.py` — it will recreate it with the correct version:
 
 ```powershell
 Remove-Item -Recurse -Force .venv
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python install.py
 ```
 
 ### `dot` is not recognized

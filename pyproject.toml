@@ -18,6 +18,11 @@ dev = [
 
 [project.scripts]
 data-pipeline-flow = "data_pipeline_flow.cli.main:main"
+data-pipeline-flow-setup = "data_pipeline_flow.cli.helpers:setup_command"
+data-pipeline-flow-make = "data_pipeline_flow.cli.helpers:make_command"
+data-pipeline-flow-inspect = "data_pipeline_flow.cli.helpers:inspect_command"
+data-pipeline-flow-edit-exclusions = "data_pipeline_flow.cli.helpers:edit_exclusions_command"
+data-pipeline-flow-manage-clusters = "data_pipeline_flow.cli.helpers:manage_clusters_command"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
