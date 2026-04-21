@@ -17,12 +17,10 @@ _usability_retest/
 .vscode/
 .idea/
 
-# planning/session notes (not for public repo)
-*_plan.md
-*_results.md
-chatgpt_plan.md
-claude-plan.md
-ui_game_plan*.md
+# planning/session notes and scratch (not for public repo)
+trash/
+
+# OS/temp files
 cat9_test*.py
 
 # generated example outputs (contain local paths)
