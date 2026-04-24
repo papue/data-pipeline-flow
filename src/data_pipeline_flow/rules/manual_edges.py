@@ -131,7 +131,10 @@ def apply_manual_edges(graph: GraphModel, config: AppConfig) -> GraphModel:
                     graph.add_diagnostic(Diagnostic(
                         level='warning',
                         code='manual_edge_node_not_found',
-                        message=f'Manual edge #{index} references node {missing_id!r} which does not exist in the graph.',
+                        message=(
+                            f"Manual edge #{index} skipped: '{missing_id}' exists on disk but was "
+                            f"never detected by the parser. Use on_missing: placeholder to force-add it."
+                        ),
                         payload={
                             'node_id': missing_id,
                             'source': source,

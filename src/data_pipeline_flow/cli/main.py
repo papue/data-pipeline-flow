@@ -11,7 +11,7 @@ from pathlib import Path
 from data_pipeline_flow.config.export import write_cluster_export
 from data_pipeline_flow.config.schema import AppConfig, load_config, sanitize_config
 from data_pipeline_flow.parser.stata_extract import write_edge_csv
-from data_pipeline_flow.render.dot import render_dot
+from data_pipeline_flow.render.dot import render_dot, resolve_dot_executable
 from data_pipeline_flow.render.json_snapshot import write_snapshot_json
 from data_pipeline_flow.rules.pipeline import PipelineBuilder
 from data_pipeline_flow.validation.diagnostics import run_basic_validation, write_validation_report
@@ -188,8 +188,9 @@ def command_render_image(args: argparse.Namespace) -> int:
     config = resolve_config(args)
     graph, dot = _render_dot_text(config, show_edge_labels=args.show_edge_labels)
 
-    dot_executable = _find_dot_executable()
-    if not dot_executable:
+    try:
+        dot_executable = resolve_dot_executable(config)
+    except RuntimeError:
         print('Graphviz was not found on PATH. Install Graphviz and make sure the "dot" command works in your terminal.', flush=True)
         print('You can still use render-dot to create a .dot file and render it later once Graphviz is installed.', flush=True)
         return 2

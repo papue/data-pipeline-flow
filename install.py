@@ -24,11 +24,45 @@ _GV_CANDIDATES = [
     Path("C:/Program Files (x86)/Graphviz/bin/dot.exe"),
 ]
 
+# Settings file where the resolved dot path is persisted.
+_SETTINGS_FILE = REPO_ROOT / "pipeline_user_settings.yaml"
+
+
+def _find_graphviz() -> tuple[str | None, bool]:
+    """Return ``(dot_path, via_probe)`` or ``(None, False)`` if not found.
+
+    ``via_probe`` is True when the path was found via a known Windows location
+    rather than via PATH, so the caller can decide whether to persist it.
+    """
+    on_path = shutil.which("dot")
+    if on_path:
+        return on_path, False
+    for candidate in _GV_CANDIDATES:
+        if candidate.exists():
+            return str(candidate), True
+    return None, False
+
+
+def _persist_dot_path(dot_path: str) -> None:
+    """Write ``graphviz_dot_path`` into pipeline_user_settings.yaml."""
+    # Read existing content (if any) to avoid clobbering other settings.
+    lines: list[str] = []
+    if _SETTINGS_FILE.exists():
+        lines = _SETTINGS_FILE.read_text(encoding="utf-8").splitlines()
+
+    # Remove any existing graphviz_dot_path line.
+    lines = [ln for ln in lines if not ln.strip().startswith("graphviz_dot_path:")]
+
+    # Append the new value.
+    # Use forward slashes so the YAML is portable.
+    lines.append(f"graphviz_dot_path: {dot_path.replace(chr(92), '/')}")
+
+    _SETTINGS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 def _graphviz_found() -> bool:
-    if shutil.which("dot"):
-        return True
-    return any(p.exists() for p in _GV_CANDIDATES)
+    dot_path, _ = _find_graphviz()
+    return dot_path is not None
 
 
 def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
@@ -68,8 +102,14 @@ def main() -> None:
 
     # ── [4/5] Graphviz check ──────────────────────────────────────────────
     print("[4/5] Checking for Graphviz...")
-    if _graphviz_found():
-        print("  OK: Graphviz dot binary found.")
+    dot_path, via_probe = _find_graphviz()
+    if dot_path:
+        if via_probe:
+            print(f"  dot not on PATH but found at {dot_path} — using full path.")
+            _persist_dot_path(dot_path)
+            print(f"  Persisted graphviz_dot_path to {_SETTINGS_FILE.name}.")
+        else:
+            print("  OK: Graphviz dot binary found on PATH.")
     else:
         print(
             "  WARNING: Graphviz not found - render-image won't work until it is installed.\n"

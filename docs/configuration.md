@@ -354,6 +354,22 @@ Always add a `note:` field explaining why the parser does not pick up the connec
 
 Review `manual_edges` entries after any project restructuring to keep them accurate.
 
+### `on_missing` — graph presence vs disk presence
+
+`on_missing` responds to whether a node exists **in the graph**, not whether the file exists **on disk**. These are different things:
+
+- A file can exist on disk and still be absent from the graph if the parser never detected it — for example, because its path is resolved from a macro, because the extension is not scanned, or because the file is excluded by an `exclusions` rule.
+- Conversely, a file can be in the graph even if the underlying file has since been deleted, because an earlier run cached its edges in the edge CSV.
+
+The two valid values are:
+
+| Value | Behavior |
+|-------|----------|
+| `warn` (default) | If either the source or target node is absent from the graph, the edge is skipped and a `manual_edge_node_not_found` warning diagnostic is emitted. The graph remains structurally valid. Use this for any node that should eventually appear — the warning is a clear signal to investigate. |
+| `placeholder` | If either node is absent, a placeholder node is created and the edge is always added. No warning is emitted. Use only for nodes that are permanently undiscoverable by the parser — such as an external database or a file owned by another team that will never be on disk. |
+
+Invalid values fall back to `warn`.
+
 ### Examples
 
 Bridge a parser gap caused by a macro-resolved path:
@@ -428,6 +444,23 @@ Useful rule of thumb:
 - want to *add one more thing* to the usual defaults -> keep the presets and add your custom rule
 - want full manual control -> clear the presets on purpose and list everything you want excluded
 
+### Sub-key reference
+
+All sub-keys are optional and default to empty lists (except `presets` and `globs` which have built-in defaults). You can mix and match freely — all active rules are unioned.
+
+| Sub-key | Matches against | Default |
+|---------|----------------|---------|
+| `presets` | Named preset groups (see below) | `[generated_outputs, archival_folders, python_runtime]` |
+| `paths` | Project-relative file paths or folder prefixes (trailing `/` = folder) | `[]` |
+| `folder_names` | Folder name anywhere in the tree, regardless of depth | `[]` |
+| `file_names` | Exact filename (basename only) regardless of folder | `[]` |
+| `exact_names` | Exact filename (basename), same as `file_names` — alternative alias | `[]` |
+| `exact_paths` | Project-relative path that must match exactly (no prefix logic) | `[]` |
+| `prefixes` | Path prefix string — excludes any node whose path starts with this value | `[]` |
+| `globs` | Shell-style glob patterns matched against the full project-relative path | `['*.tmp', '*.bak']` |
+
+> **Important:** To exclude a folder by name, use `folder_names:` — not `paths:`. The `paths:` key matches files and path prefixes, but `folder_names:` is specifically designed to drop any folder with that name at any depth in the project tree.
+
 ### `presets`
 
 Default:
@@ -438,7 +471,7 @@ Default:
 
 ### `paths`
 
-Convenience list for exact file paths or folder prefixes.
+Convenience list for exact file paths or folder prefixes. A trailing slash signals a folder/prefix exclusion; without it the entry is matched as a file path.
 
 Examples:
 
@@ -448,11 +481,24 @@ paths:
   - data/tmp_snapshot.csv
 ```
 
-A trailing slash is treated as a folder/prefix exclusion.
+> **Note:** `paths:` is intended for files and specific sub-tree prefixes. To drop a folder by name regardless of where it appears in the tree, use `folder_names:` instead.
+
+### `folder_names`
+
+Excludes any folder with this name at any depth in the project tree. This is the correct way to suppress a folder name that appears in multiple places.
+
+Example:
+
+```yaml
+folder_names:
+  - scratch
+  - old
+  - __pycache__
+```
 
 ### `file_names`
 
-Convenience alias for exact file-name exclusions regardless of folder.
+Excludes any file with this exact basename regardless of which folder it lives in.
 
 Example:
 
@@ -460,4 +506,54 @@ Example:
 file_names:
   - notes.txt
   - debug_copy.do
+```
+
+### `exact_names`
+
+Alias for `file_names`. Both sub-keys behave identically — use whichever reads more clearly in your config.
+
+Example:
+
+```yaml
+exact_names:
+  - throwaway.do
+```
+
+### `exact_paths`
+
+Excludes a node whose project-relative path matches exactly. Unlike `paths:`, no prefix logic is applied — the full path must match character-for-character.
+
+Example:
+
+```yaml
+exact_paths:
+  - data/raw/vendor_snapshot_2023.csv
+```
+
+### `prefixes`
+
+Excludes any node whose project-relative path starts with the given string. Useful for dropping an entire sub-tree that does not have a consistent folder name.
+
+Example:
+
+```yaml
+prefixes:
+  - data/raw/external_
+  - logs/
+```
+
+### `globs`
+
+Shell-style glob patterns matched against each node's full project-relative path. Supports `*` (any characters within a single path segment) and `**` (any path depth).
+
+Default: `['*.tmp', '*.bak']`
+
+Example:
+
+```yaml
+globs:
+  - '*.tmp'
+  - '*.bak'
+  - 'data/temp_*'
+  - '**/_scratch_*'
 ```

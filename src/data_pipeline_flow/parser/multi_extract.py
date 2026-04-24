@@ -208,9 +208,20 @@ def build_graph_from_scripts(
                 role='script',
                 metadata={'language': child_lang},
             ))
+            # For Python imports and R source() the data-flow direction is reversed:
+            # the imported/sourced module (child) feeds *into* the importing script (rel).
+            # R's source() executes the helper in the calling environment, making
+            # functions/objects from the helper available to the caller — semantically
+            # identical to Python import.
+            # For Stata `do`, the caller drives sequential execution so the conventional
+            # caller → child direction is kept.
+            if lang in ('python', 'r'):
+                edge_source, edge_target = child, rel
+            else:
+                edge_source, edge_target = rel, child
             graph.add_edge(Edge(
-                source=rel,
-                target=child,
+                source=edge_source,
+                target=edge_target,
                 operation=call_op,
                 kind='script_call',
                 visible_label=None,

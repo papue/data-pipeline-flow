@@ -1,0 +1,4 @@
+manual_edges:
+  - source: "script_a.py"
+    target: "artifact.parquet"
+    on_missing: warn

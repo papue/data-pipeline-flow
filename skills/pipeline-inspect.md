@@ -105,6 +105,43 @@ If a new script was added: confirm its node ID and edges in the graph.
 
 ---
 
+## Exclusion sub-keys quick reference
+
+When the graph is too noisy or a folder that should be hidden is still appearing,
+adjust the `exclusions:` block in the config. All sub-keys are optional lists and
+are unioned together.
+
+| Sub-key | What it matches |
+|---------|----------------|
+| `presets` | Named preset groups: `generated_outputs`, `archival_folders`, `python_runtime` |
+| `folder_names` | Any folder with this name at any depth in the tree |
+| `file_names` | Any file with this exact basename, regardless of folder |
+| `exact_names` | Alias for `file_names` |
+| `exact_paths` | A project-relative path that must match exactly (no prefix logic) |
+| `paths` | Project-relative file paths or folder prefixes (trailing `/` = folder prefix) |
+| `prefixes` | Any node whose project-relative path starts with this string |
+| `globs` | Shell glob patterns matched against the full project-relative path (`*.tmp`, `**/_scratch_*`) |
+
+> **To exclude a folder by name, use `folder_names:` — not `paths:`.** The
+> `folder_names:` key drops any folder with that name at any depth; `paths:`
+> is intended for specific file paths and sub-tree prefixes.
+
+Example:
+
+```yaml
+exclusions:
+  presets:
+    - generated_outputs
+    - archival_folders
+    - python_runtime
+  folder_names:
+    - scratch
+    - old
+  globs:
+    - '*.tmp'
+```
+
+
 ## Gotchas
 
 - **`--config` is never auto-discovered.** Even if the config sits at the project

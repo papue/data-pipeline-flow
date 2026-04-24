@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from data_pipeline_flow.config.schema import ExclusionConfig, NormalizationConfig, ParserConfig
-from data_pipeline_flow.model.normalize import normalize_token, to_project_relative
+from data_pipeline_flow.model.normalize import _is_absolute_like, normalize_token, to_project_relative
 from data_pipeline_flow.rules.exclusions import is_excluded
 from data_pipeline_flow.parser.stata_extract import (
     Diagnostic,
@@ -20,8 +20,25 @@ _COMMENT_RE = re.compile(r'#.*$')
 
 # ---------------------------------------------------------------------------
 # Patterns: variable assignment  VAR = "value"  or  VAR = 'value'
+# Also matches raw strings:  VAR = r"C:\path\to\dir"
 # ---------------------------------------------------------------------------
-_VAR_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(?:"([^"\\]*)"|\'([^\'\\]*)\')\s*$')
+_VAR_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(?:r?"([^"]*)"|r?\'([^\']*)\')\s*$')
+
+# ---------------------------------------------------------------------------
+# Pattern: VAR = os.path.join(...)  assignment
+# ---------------------------------------------------------------------------
+_VAR_OSPATH_JOIN_RE = re.compile(r'^\s*(\w+)\s*=\s*os\.path\.join\s*\(([^)]+)\)')
+
+# ---------------------------------------------------------------------------
+# Pattern: f-string with a known file extension (lower priority, produces
+# a placeholder node so the edge is at least visible in the graph).
+# Matches: f"...{expr}....<ext>"  where ext is a data file extension.
+# ---------------------------------------------------------------------------
+_FSTRING_WITH_EXT_RE = re.compile(
+    r'\bf(?:"[^"]*\{[^}]+\}[^"]*\.(parquet|csv|pkl|pickle|feather|json|xlsx|dta|npy|npz|hdf|h5|orc)"'
+    r"|'[^']*\{[^}]+\}[^']*\.(parquet|csv|pkl|pickle|feather|json|xlsx|dta|npy|npz|hdf|h5|orc)')",
+    re.I,
+)
 
 # ---------------------------------------------------------------------------
 # Patterns: import alias tracking
@@ -277,23 +294,70 @@ def _try_match(pattern: re.Pattern[str], line: str, vars_map: dict[str, str]) ->
     return raw
 
 
-def _resolve_ospath_join(text: str, vars_map: dict[str, str]) -> str | None:
-    """Resolve os.path.join(...) if all args are literals or known vars."""
+def _resolve_ospath_join(
+    text: str,
+    vars_map: dict[str, str],
+    abs_vars: set[str] | None = None,
+) -> tuple[str | None, bool]:
+    """Resolve os.path.join(...) if all args are literals or known vars.
+
+    Returns ``(resolved_path, contained_absolute)`` where ``contained_absolute``
+    is True when an absolute-path variable was encountered as one of the
+    arguments.  In that case only the non-absolute literal suffix parts are
+    joined so that a partial (flagged) edge can still be emitted.
+    """
     m = _OSPATH_JOIN_RE.search(text)
     if not m:
-        return None
+        return None, False
     args_text = m.group(1)
-    parts = []
+    parts: list[str] = []
+    contained_absolute = False
     for piece in args_text.split(','):
         piece = piece.strip()
         quoted = _extract_quoted(piece)
         if quoted is not None:
-            parts.append(quoted)
+            if _is_absolute_like(quoted):
+                # Skip absolute base components — we keep only the literal suffix parts
+                contained_absolute = True
+            else:
+                parts.append(quoted)
         elif piece in vars_map:
-            parts.append(vars_map[piece])
+            val = vars_map[piece]
+            if abs_vars is not None and piece in abs_vars:
+                # Skip the absolute base — we keep only the literal suffix parts
+                contained_absolute = True
+            else:
+                parts.append(val)
         else:
-            return None  # unresolvable
-    return '/'.join(parts) if parts else None
+            if contained_absolute:
+                # We already found an absolute prefix; remaining unknowns block resolution
+                return None, True
+            return None, False  # unresolvable
+    if not parts:
+        return None, contained_absolute
+    return '/'.join(parts), contained_absolute
+
+
+def _extract_fstring_placeholder(raw_fstring: str) -> str | None:
+    """
+    Given the content of an f-string that still contains ``{expr}`` placeholders,
+    return a sanitised placeholder path like ``{dynamic}/result_*.pkl`` if the
+    f-string ends with a recognised data-file extension.
+
+    The heuristic replaces every ``{...}`` block with ``*`` so the placeholder
+    looks like a glob pattern, making it obvious that the exact filename varies.
+    """
+    # Strip surrounding quotes and the leading f/F
+    content = raw_fstring
+    for prefix in ('f"', "f'", 'F"', "F'"):
+        if content.startswith(prefix):
+            content = content[len(prefix):]
+            break
+    if content.endswith('"') or content.endswith("'"):
+        content = content[:-1]
+    # Replace {expr} blocks with *
+    placeholder = re.sub(r'\{[^}]+\}', '*', content)
+    return placeholder
 
 
 def _resolve_path_div(text: str, vars_map: dict[str, str]) -> list[str]:
@@ -416,13 +480,29 @@ def parse_python_file(
     rel_script = normalize_token(rel_script)
 
     # --- Pre-pass 1: collect variable assignments ---
+    # Two sub-passes so that joined-path vars can reference already-resolved vars.
     vars_map: dict[str, str] = {}
+    abs_vars: set[str] = set()  # variable names whose values are absolute paths
+    # Sub-pass 1a: plain string literals  VAR = "value"  or  VAR = r"value"
     for line in raw_lines:
         clean = _strip_comment(line)
         m = _VAR_ASSIGN_RE.match(clean)
         if m:
             val = m.group(2) if m.group(2) is not None else m.group(3)
             vars_map[m.group(1)] = val
+            if _is_absolute_like(val):
+                abs_vars.add(m.group(1))
+    # Sub-pass 1b: VAR = os.path.join(...)  where components resolve from vars_map
+    for line in raw_lines:
+        clean = _strip_comment(line)
+        m = _VAR_OSPATH_JOIN_RE.match(clean)
+        if m:
+            var_name = m.group(1)
+            joined, _abs = _resolve_ospath_join(clean, vars_map, abs_vars)
+            if joined is not None:
+                vars_map[var_name] = joined
+                if _abs:
+                    abs_vars.add(var_name)
 
     # --- Pre-pass 2: collect import aliases ---
     lib_aliases, direct_fn_names = _collect_aliases(raw_lines)
@@ -449,7 +529,7 @@ def parse_python_file(
 
     seen_paths: set[tuple[str, str]] = set()  # (command, normalized_path) dedup
 
-    def _add_event(line_no: int, command: str, raw_path: str, is_write: bool) -> None:
+    def _add_event(line_no: int, command: str, raw_path: str, is_write: bool, force_abs: bool = False) -> None:
         if _is_external(raw_path):
             global_warnings.append(Diagnostic(
                 level='info',
@@ -476,7 +556,7 @@ def parse_python_file(
             command=command,
             raw_path=raw_path,
             normalized_paths=[norm],
-            was_absolute=was_abs,
+            was_absolute=was_abs or force_abs,
         ))
 
     def _add_child(raw_path: str) -> None:
@@ -498,7 +578,13 @@ def parse_python_file(
                 # Check relative to project root
                 for base in (project_root, py_file.parent):
                     candidate = base / candidate_path
-                    if candidate.exists():
+                    try:
+                        exists = candidate.exists()
+                    except OSError:
+                        # Can happen on Windows when the candidate resolves to a
+                        # UNC path (e.g. //server/share) that is not reachable.
+                        exists = False
+                    if exists:
                         _add_child(str(candidate.relative_to(project_root)).replace('\\', '/'))
                         break
 
@@ -540,19 +626,34 @@ def parse_python_file(
         line = _FSTRING_DOUBLE_RE.sub(_resolve_fstring_double, line)
         line = _FSTRING_SINGLE_RE.sub(_resolve_fstring_single, line)
 
-        # --- Expand bare variable names to quoted values for pattern matching ---
-        for _var, _val in vars_map.items():
-            line = re.sub(rf'\b{re.escape(_var)}\b', f'"{_val}"', line)
-
-        # --- Path helper: os.path.join ---
-        joined = _resolve_ospath_join(line, vars_map)
+        # --- Path helper: os.path.join (run BEFORE variable expansion) ---
+        # Must run before variable expansion so that abs_vars detection works:
+        # if BASE is an absolute-path variable, _resolve_ospath_join sees "BASE"
+        # in the args and uses abs_vars to skip it, returning only the literal
+        # suffix components so a partial (flagged) edge can still be emitted.
+        joined, join_was_abs = _resolve_ospath_join(line, vars_map, abs_vars)
         if joined:
-            # Replace in line for subsequent pattern matching (best-effort)
+            # Replace os.path.join(...) expression with the resolved string so
+            # subsequent read/write patterns can match it as a quoted literal.
             line = line.replace(
                 _OSPATH_JOIN_RE.search(line).group(0),  # type: ignore[union-attr]
                 f'"{joined}"',
                 1,
             )
+        # Track whether the current line's join resolution involved an absolute var
+        _join_force_abs = join_was_abs
+
+        # --- Expand bare variable names to quoted values for pattern matching ---
+        # Skip absolute-path variables: they are only useful inside os.path.join
+        # (handled above) and expanding them would insert Windows paths with
+        # backslashes that confuse _QUOTED_RE and other patterns.
+        for _var, _val in vars_map.items():
+            if _var in abs_vars:
+                continue
+            # Use a lambda so backslashes in _val are treated as literals, not
+            # regex replacement escape sequences (e.g. C:\Users would be \U...).
+            _quoted_val = f'"{_val}"'
+            line = re.sub(rf'\b{re.escape(_var)}\b', lambda _m, _r=_quoted_val: _r, line)
 
         # --- Path helper: Path("a") / "b" ---
         for path_div_result in _resolve_path_div(line, vars_map):
@@ -563,21 +664,48 @@ def parse_python_file(
             pass  # handled by substituting in subsequent patterns below
 
         # --- Read patterns ---
+        read_matched = False
         for command, pattern in read_patterns:
             raw = _try_match(pattern, line, vars_map)
             if raw is not None:
                 # Also try variable expansion
                 expanded = vars_map.get(raw, raw)
-                _add_event(line_no, command, expanded, is_write=False)
+                _add_event(line_no, command, expanded, is_write=False, force_abs=_join_force_abs)
+                read_matched = True
                 break  # one read per line (first match)
 
         # --- Write patterns ---
+        write_matched = False
         for command, pattern in write_patterns:
             raw = _try_match(pattern, line, vars_map)
             if raw is not None:
                 expanded = vars_map.get(raw, raw)
-                _add_event(line_no, command, expanded, is_write=True)
+                _add_event(line_no, command, expanded, is_write=True, force_abs=_join_force_abs)
+                write_matched = True
                 break  # one write per line (first match)
+
+        # --- F-string partial placeholder (lower priority) ---
+        # Only emit a placeholder when no concrete path was already found,
+        # and only on lines that look like they pass data to a read/write call.
+        if not read_matched and not write_matched:
+            for fstr_m in _FSTRING_WITH_EXT_RE.finditer(raw_line):
+                raw_fstr = fstr_m.group(0)
+                placeholder = _extract_fstring_placeholder(raw_fstr)
+                if placeholder:
+                    # Guess write vs read: if the line contains "open" with a
+                    # write-mode flag or a known write method, treat as write.
+                    is_write = bool(re.search(
+                        r'open\s*\([^)]*[,\s]["\'][wa]', raw_line, re.I
+                    ) or re.search(
+                        r'\.(to_csv|to_parquet|to_excel|to_json|to_feather|'
+                        r'to_hdf|to_pickle|to_orc|to_stata|savefig|save)\s*\(',
+                        raw_line, re.I,
+                    ) or re.search(
+                        r'\bpickle\.dump\b|\bjson\.dump\b|\bjoblib\.dump\b',
+                        raw_line, re.I,
+                    ))
+                    _add_event(line_no, 'fstring_path', placeholder, is_write=is_write)
+                    break  # one placeholder per line
 
     return ScriptParseResult(
         events=events,

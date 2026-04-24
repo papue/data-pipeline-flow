@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import PurePosixPath
 
-from data_pipeline_flow.config.schema import DisplayConfig, LayoutConfig
+from data_pipeline_flow.config.schema import AppConfig, DisplayConfig, LayoutConfig
 from data_pipeline_flow.model.entities import Cluster, GraphModel, Node
+
+# Known Windows installation paths probed when dot is not on PATH.
+_WINDOWS_CANDIDATES = [
+    r"C:\Program Files\Graphviz\bin\dot.exe",
+    r"C:\Program Files (x86)\Graphviz\bin\dot.exe",
+]
+
+
+def resolve_dot_executable(config: AppConfig | None = None) -> str:
+    """Return the path to the Graphviz ``dot`` executable.
+
+    Resolution order:
+    1. ``config.graphviz_dot_path`` — explicit override from user settings.
+    2. ``shutil.which("dot")`` — dot is on PATH.
+    3. Known Windows install locations (``C:/Program Files/Graphviz/…``).
+    4. ``RuntimeError`` — Graphviz not found; message includes install hint.
+    """
+    # 1. Explicit config path takes priority.
+    if config is not None and getattr(config, 'graphviz_dot_path', None):
+        return config.graphviz_dot_path  # type: ignore[return-value]
+
+    # 2. Check PATH.
+    on_path = shutil.which("dot")
+    if on_path:
+        return on_path
+
+    # 3. Probe Windows candidates.
+    for candidate in _WINDOWS_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise RuntimeError(
+        "Graphviz 'dot' executable not found. "
+        "Install Graphviz from https://graphviz.org/download/ and ensure "
+        "'dot' is on PATH, or set graphviz_dot_path in your config file."
+    )
 
 _BASE_NODE_STYLE = {
     'script': 'shape=box, style="rounded,filled", margin="0.10,0.06"',

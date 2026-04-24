@@ -19,6 +19,8 @@ _usability_retest/
 
 # planning/session notes and scratch (not for public repo)
 trash/
+feedback/
+INSTALL_ANALYSIS.md
 
 # OS/temp files
 cat9_test*.py

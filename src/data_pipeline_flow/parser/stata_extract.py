@@ -16,18 +16,19 @@ GLOBAL_RE = re.compile(r'^\s*global\s+(\w+)\s+(.+?)\s*$', re.I)
 LOCAL_RE = re.compile(r'^\s*local\s+(\w+)\s+(.+?)\s*$', re.I)
 FOREACH_RE = re.compile(r'^\s*foreach\s+(\w+)\s+(?:in|of\s+local)\s+(.+?)\s*\{\s*$', re.I)
 FORVALUES_RE = re.compile(r'^\s*forvalues\s+(\w+)\s*=\s*(-?\d+)\s*/\s*(-?\d+)\s*\{\s*$', re.I)
-DO_RE = re.compile(r'\bdo\s+"([^"]+)"', re.I)
-USE_RE = re.compile(r'\buse\s+"([^"]+)"', re.I)
-SAVE_RE = re.compile(r'\bsave\s+"([^"]+)"', re.I)
-IMPORT_RE = re.compile(r'\bimport\s+(?:delimited|excel)\s+"([^"]+)"', re.I)
-EXPORT_DELIMITED_RE = re.compile(r'\bexport\s+delimited\s+using\s+"([^"]+)"', re.I)
-EXPORT_EXCEL_RE = re.compile(r'\bexport\s+excel\s+using\s+"([^"]+)"', re.I)
-GRAPH_EXPORT_RE = re.compile(r'\bgraph\s+export\s+"([^"]+)"', re.I)
-ESTIMATES_SAVE_RE = re.compile(r'\bestimates\s+save\s+"([^"]+)"', re.I)
-APPEND_RE = re.compile(r'\bappend\s+using\s+"([^"]+)"', re.I)
-MERGE_RE = re.compile(r'\bmerge\s+[^\n]*?using\s+"([^"]+)"', re.I)
-CROSS_RE = re.compile(r'\bcross\s+using\s+"([^"]+)"', re.I)
-ERASE_RE = re.compile(r'\berase\s+"([^"]+)"', re.I)
+_PATH = r'"([^"]+)"|([^\s,]+\.[^\s,]+)'
+DO_RE = re.compile(r'\bdo\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+USE_RE = re.compile(r'\buse\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+SAVE_RE = re.compile(r'\bsave\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+IMPORT_RE = re.compile(r'\bimport\s+(?:delimited|excel)\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+EXPORT_DELIMITED_RE = re.compile(r'\bexport\s+delimited\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+EXPORT_EXCEL_RE = re.compile(r'\bexport\s+excel\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+GRAPH_EXPORT_RE = re.compile(r'\bgraph\s+export\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+ESTIMATES_SAVE_RE = re.compile(r'\bestimates\s+save\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+APPEND_RE = re.compile(r'\bappend\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+MERGE_RE = re.compile(r'\bmerge\s+[^\n]*?using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+CROSS_RE = re.compile(r'\bcross\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+ERASE_RE = re.compile(r'\berase\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 MACRO_TOKEN_RE = re.compile(r"`([^']+)'")
 VERSION_TOKEN_RE = re.compile(r'(?i)(?:_v\d+|_(?:qc|pp|final|draft))(?=\.[^.]+$)')
 
@@ -86,10 +87,10 @@ def expand(path_expr: str, globals_map: dict[str, str]) -> str:
     while changed:
         changed = False
         for key, value in globals_map.items():
-            token = f'${key}'
-            if token in path:
-                path = path.replace(token, value)
-                changed = True
+            for token in (f'${{{key}}}', f'${key}'):
+                if token in path:
+                    path = path.replace(token, value)
+                    changed = True
     return path
 
 
@@ -177,6 +178,11 @@ def _excluded_reference(rel_script: str, line: int, command: str, normalized_pat
     )
 
 
+def _path_group(m: re.Match) -> str:
+    """Return the captured path from a two-group regex (quoted | unquoted)."""
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
 def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig, normalization: NormalizationConfig, parser_config: ParserConfig) -> ScriptParseResult:
     globals_map: dict[str, str] = {}
     local_map: dict[str, list[str]] = {}
@@ -253,7 +259,7 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
 
         d = DO_RE.search(line)
         if d:
-            expansions, _, _ = _resolve_dynamic_path(d.group(1), globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
+            expansions, _, _ = _resolve_dynamic_path(_path_group(d), globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
             for expanded in expansions:
                 norm, _ = to_project_relative(project_root, expanded, normalization)
                 norm = normalize_token(norm)
@@ -268,7 +274,8 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
             m = regex.search(line)
             if not m:
                 continue
-            expansions, resolution_status, pattern = _resolve_dynamic_path(m.group(1), globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
+            raw_path = _path_group(m)
+            expansions, resolution_status, pattern = _resolve_dynamic_path(raw_path, globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
             normalized_paths: list[str] = []
             any_absolute = False
             for expanded in expansions:
@@ -280,7 +287,7 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
                 else:
                     normalized_paths.append(norm)
             if normalized_paths:
-                events.append(ParsedEvent(rel_script, i, command, m.group(1), normalized_paths, any_absolute, resolution_status, pattern))
+                events.append(ParsedEvent(rel_script, i, command, raw_path, normalized_paths, any_absolute, resolution_status, pattern))
             matched = True
             break
         if matched:
@@ -290,7 +297,8 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
             m = regex.search(line)
             if not m:
                 continue
-            expansions, resolution_status, pattern = _resolve_dynamic_path(m.group(1), globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
+            raw_path = _path_group(m)
+            expansions, resolution_status, pattern = _resolve_dynamic_path(raw_path, globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
             normalized_paths: list[str] = []
             any_absolute = False
             for expanded in expansions:
@@ -302,7 +310,7 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
                 else:
                     normalized_paths.append(norm)
             if normalized_paths:
-                events.append(ParsedEvent(rel_script, i, command, m.group(1), normalized_paths, any_absolute, resolution_status, pattern))
+                events.append(ParsedEvent(rel_script, i, command, raw_path, normalized_paths, any_absolute, resolution_status, pattern))
             matched = True
             break
         if matched:
@@ -310,14 +318,15 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
 
         m = ERASE_RE.search(line)
         if m:
-            expansions, _, _ = _resolve_dynamic_path(m.group(1), globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
+            raw_path = _path_group(m)
+            expansions, _, _ = _resolve_dynamic_path(raw_path, globals_map, local_map, loop_stack, parser_config.dynamic_paths.placeholder_token)
             for expanded in expansions:
                 norm, was_absolute = to_project_relative(project_root, expanded, normalization)
                 norm = normalize_token(norm)
                 if is_excluded(norm, exclusions):
                     excluded_references.append(_excluded_reference(rel_script, i, 'erase', norm))
                 else:
-                    events.append(ParsedEvent(rel_script, i, 'erase', m.group(1), [norm], was_absolute))
+                    events.append(ParsedEvent(rel_script, i, 'erase', raw_path, [norm], was_absolute))
 
     return ScriptParseResult(
         events=events,

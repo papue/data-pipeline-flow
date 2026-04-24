@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 import json
+import sys
 
 try:
     import yaml  # type: ignore
@@ -128,6 +130,7 @@ class AppConfig:
     clusters: list[ManualClusterConfig] = field(default_factory=list)
     languages: LanguagesConfig = field(default_factory=LanguagesConfig)
     manual_edges: list[ManualEdgeConfig] = field(default_factory=list)
+    graphviz_dot_path: str | None = None
 
 
 def _merge_dataclass_config(cls: type, raw: dict[str, Any]) -> Any:
@@ -271,6 +274,20 @@ def sanitize_config(config: AppConfig) -> AppConfig:
 
     return config
 
+def _warn_unknown_top_level_keys(raw: dict[str, Any], path: Path) -> None:
+    """Emit a stderr warning for each top-level YAML key that is not a known AppConfig field."""
+    known_keys = {f.name for f in dataclasses.fields(AppConfig)}
+    unknown = sorted(k for k in raw if k not in known_keys)
+    if unknown:
+        known_sorted = sorted(known_keys)
+        for key in unknown:
+            print(
+                f"[config] Warning: Unknown config key '{key}' in {path} — "
+                f"this block will be ignored. Known keys are: {', '.join(known_sorted)}",
+                file=sys.stderr,
+            )
+
+
 def load_config(path: Path) -> AppConfig:
     suffix = path.suffix.lower()
     text = path.read_text(encoding='utf-8')
@@ -285,6 +302,8 @@ def load_config(path: Path) -> AppConfig:
             ) from exc
     else:
         raw = json.loads(text)
+
+    _warn_unknown_top_level_keys(raw, path)
 
     display = _merge_dataclass_config(DisplayConfig, raw.get('display', {}))
     exclusions = _merge_dataclass_config(ExclusionConfig, raw.get('exclusions', {}))
@@ -307,6 +326,8 @@ def load_config(path: Path) -> AppConfig:
 
     manual_clusters = _load_manual_clusters(raw.get('clusters', []))
     manual_edges = _load_manual_edges(raw.get('manual_edges', []))
+    graphviz_dot_path_raw = raw.get('graphviz_dot_path')
+    graphviz_dot_path = str(graphviz_dot_path_raw).strip() if graphviz_dot_path_raw else None
     return sanitize_config(AppConfig(
         project_root=raw.get('project_root', '.'),
         display=display,
@@ -319,4 +340,5 @@ def load_config(path: Path) -> AppConfig:
         clusters=manual_clusters,
         languages=languages,
         manual_edges=manual_edges,
+        graphviz_dot_path=graphviz_dot_path,
     ))
