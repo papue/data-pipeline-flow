@@ -1,0 +1,5 @@
+# 2a: Script-relative path via sys.frame (R's __file__ idiom)
+script_dir <- dirname(sys.frame(1)$ofile)
+data_path <- file.path(script_dir, "..", "data", "results.csv")
+df <- read.csv(data_path)
+write.csv(df, file.path(script_dir, "..", "output", "processed.csv"))

@@ -14,14 +14,16 @@ from data_pipeline_flow.rules.exclusions import is_excluded
 
 GLOBAL_RE = re.compile(r'^\s*global\s+(\w+)\s+(.+?)\s*$', re.I)
 LOCAL_RE = re.compile(r'^\s*local\s+(\w+)\s+(.+?)\s*$', re.I)
+LOCAL_COMPUTED_RE = re.compile(r'^\s*local\s+(\w+)\s*=\s*(.+?)\s*$', re.I)
 FOREACH_RE = re.compile(r'^\s*foreach\s+(\w+)\s+(?:in|of\s+local)\s+(.+?)\s*\{\s*$', re.I)
 FORVALUES_RE = re.compile(r'^\s*forvalues\s+(\w+)\s*=\s*(-?\d+)\s*/\s*(-?\d+)\s*\{\s*$', re.I)
 _PATH = r'"([^"]+)"|([^\s,]+\.[^\s,]+)'
 DO_RE = re.compile(r'\bdo\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 USE_RE = re.compile(r'\buse\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 SAVE_RE = re.compile(r'\bsave\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
-IMPORT_RE = re.compile(r'\bimport\s+(?:delimited|excel)\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
-EXPORT_DELIMITED_RE = re.compile(r'\bexport\s+delimited\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+IMPORT_RE = re.compile(r'\bimport\s+(?:delimited|excel)\s+(?:using\s+)?(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+EXPORT_DELIMITED_RE = re.compile(r'\bexport\s+delimited\s+(?:using\s+)?(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
+INSHEET_RE = re.compile(r'\binsheet\s+(?:using\s+)?(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 EXPORT_EXCEL_RE = re.compile(r'\bexport\s+excel\s+using\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 GRAPH_EXPORT_RE = re.compile(r'\bgraph\s+export\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
 ESTIMATES_SAVE_RE = re.compile(r'\bestimates\s+save\s+(?:"([^"]+)"|([^\s,]+\.[^\s,]+))', re.I)
@@ -35,6 +37,7 @@ VERSION_TOKEN_RE = re.compile(r'(?i)(?:_v\d+|_(?:qc|pp|final|draft))(?=\.[^.]+$)
 READ_COMMANDS = {
     'use': USE_RE,
     'import': IMPORT_RE,
+    'insheet': INSHEET_RE,
     'append': APPEND_RE,
     'merge': MERGE_RE,
     'cross': CROSS_RE,
@@ -72,6 +75,20 @@ class ScriptParseResult:
 class LoopFrame:
     variable: str
     values: list[str]
+
+
+def _join_stata_continuations(text: str) -> str:
+    """Join lines ending with /// (Stata line continuation) before any other parsing."""
+    lines = text.splitlines()
+    result, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        while line.rstrip().endswith('///') and i + 1 < len(lines):
+            line = line.rstrip()[:-3].rstrip() + ' ' + lines[i + 1].lstrip()
+            i += 1
+        result.append(line)
+        i += 1
+    return '\n'.join(result)
 
 
 def _strip_quotes(text: str) -> str:
@@ -140,7 +157,29 @@ def _resolve_dynamic_path(
             current = current.replace(f"`{token}'", replacement)
         expansions.append(current)
 
-    deduped = list(dict.fromkeys(expansions))
+    # Second pass: resolve any nested local references that appeared after substitution
+    second_pass: list[str] = []
+    for path_str in expansions:
+        nested_tokens = MACRO_TOKEN_RE.findall(path_str)
+        if not nested_tokens:
+            second_pass.append(path_str)
+            continue
+        nested_missing = [t for t in nested_tokens if t not in env]
+        if nested_missing:
+            # Some still unresolved — keep as partial
+            second_pass.append(path_str)
+            continue
+        nested_unique: list[str] = []
+        for token in nested_tokens:
+            if token not in nested_unique:
+                nested_unique.append(token)
+        for combination2 in itertools.product(*(env[token] for token in nested_unique)):
+            current2 = path_str
+            for token, replacement in zip(nested_unique, combination2):
+                current2 = current2.replace(f"`{token}'", replacement)
+            second_pass.append(current2)
+
+    deduped = list(dict.fromkeys(second_pass))
     return deduped, 'full', None
 
 
@@ -211,6 +250,15 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
             global_warnings=global_warnings,
             excluded_references=[],
         )
+
+    # BUG-1: Join /// line continuations before any other parsing
+    file_text = _join_stata_continuations(file_text)
+
+    # BUG-2/BUG-3: Pre-seed Stata system constants as locals
+    # c(pwd) approximated by "." (project root); c(current_do_file) by the script path
+    local_map['c(pwd)'] = ['.']
+    local_map['c(current_do_file)'] = [str(do_file)]
+
     for i, line in enumerate(file_text.splitlines(), start=1):
         stripped = line.strip()
         if stripped == '}' and loop_stack:
@@ -219,8 +267,14 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
 
         g = GLOBAL_RE.search(line)
         if g:
-            expanded = expand(_strip_quotes(g.group(2)), globals_map)
+            raw_val = _strip_quotes(g.group(2))
+            expanded = expand(raw_val, globals_map)
+            # BUG-8: Preserve trailing slash so that "${ddir}file.dta" concatenates correctly.
+            # We store the normalized form but re-append the slash if the original ended with one.
+            trailing_slash = expanded.endswith('/') or expanded.endswith('\\')
             norm, was_absolute = to_project_relative(project_root, expanded, normalization)
+            if trailing_slash and not norm.endswith('/'):
+                norm = norm + '/'
             globals_map[g.group(1)] = norm
             if was_absolute:
                 global_warnings.append(
@@ -231,6 +285,19 @@ def parse_do_file(project_root: Path, do_file: Path, exclusions: ExclusionConfig
                         payload={'script': rel_script, 'path': norm},
                     )
                 )
+            continue
+
+        # BUG-3: Detect computed local assignments (local name = expr(...))
+        # Function calls produce garbage if split on whitespace; store placeholder instead.
+        computed = LOCAL_COMPUTED_RE.search(line)
+        if computed:
+            rhs = computed.group(2).strip()
+            # If RHS contains parentheses (function call) or unresolvable system references,
+            # store a single opaque placeholder to avoid garbage path expansion.
+            if '(' in rhs:
+                local_map[computed.group(1)] = [parser_config.dynamic_paths.placeholder_token]
+            else:
+                local_map[computed.group(1)] = _collect_local_values(rhs)
             continue
 
         local = LOCAL_RE.search(line)

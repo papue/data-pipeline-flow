@@ -31,6 +31,31 @@ _VAR_ASSIGN_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Script-relative directory idioms (R's __file__ equivalents)
+# Matches:  var <- dirname(sys.frame(1)$ofile)
+#           var <- dirname(getSrcFilename(...))
+#           var <- dirname(rstudioapi::getActiveDocumentContext()$path)
+#           var <- tryCatch(dirname(sys.frame(1)$ofile), ...)  — first branch
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR_RE = re.compile(
+    r'^\s*(\w+)\s*(?:<-|=)\s*'
+    r'(?:tryCatch\s*\(\s*)?'  # optional tryCatch(
+    r'dirname\s*\('
+    r'(?:'
+    r'sys\.frame\s*\([^)]*\)\s*\$ofile'
+    r'|getSrcFilename\s*\([^)]*\)'
+    r'|rstudioapi::getActiveDocumentContext\s*\(\s*\)\s*\$path'
+    r')',
+    re.I,
+)
+
+# getSrcFilename assigned directly (two-step: script_path <- getSrcFilename(...); script_dir <- dirname(script_path))
+_GETSRCFILENAME_RE = re.compile(
+    r'^\s*(\w+)\s*(?:<-|=)\s*getSrcFilename\s*\(',
+    re.I,
+)
+
+# ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 # here("a", "b", "c")  or  here::here("a", "b")
@@ -39,8 +64,8 @@ _HERE_RE = re.compile(r'\bhere(?:::here)?\s*\(([^)]+)\)', re.I)
 _FILEPATH_RE = re.compile(r'\bfile\.path\s*\(([^)]+)\)', re.I)
 # paste0("a", var, "b")
 _PASTE0_RE = re.compile(r'\bpaste0\s*\(([^)]+)\)', re.I)
-# sprintf("template/%s/file.csv", literal_or_var)  — single %s only
-_SPRINTF_RE = re.compile(r'\bsprintf\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*,\s*([^)]+)\)', re.I)
+# sprintf("template/%s/file.csv", arg1, arg2, ...)  — one or more placeholders
+_SPRINTF_RE = re.compile(r'\bsprintf\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*,\s*(.+)\)\s*$', re.I)
 
 # ---------------------------------------------------------------------------
 # Quoted string extraction
@@ -179,6 +204,40 @@ _SYS_SOURCE_RE = re.compile(r'\bsys\.source\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', 
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _join_continued_lines(lines: list[str]) -> list[str]:
+    """
+    Join lines where parentheses are not yet closed so that multi-line
+    function calls become a single logical line.  Each joined line keeps
+    the line-number of the FIRST physical line (the rest are replaced with
+    empty strings so line counts stay correct).
+    """
+    result: list[str] = []
+    buf = ''
+    depth = 0
+    for raw in lines:
+        # Strip comment for paren-counting but keep original for result
+        stripped = _strip_comment(raw)
+        for ch in stripped:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+        if buf:
+            buf = buf.rstrip() + ' ' + raw.strip()
+        else:
+            buf = raw
+        if depth <= 0:
+            result.append(buf)
+            buf = ''
+            depth = 0
+        else:
+            # Will be consumed by next line; emit empty placeholder
+            result.append('')
+    if buf:
+        result.append(buf)
+    return result
+
+
 def _strip_comment(line: str) -> str:
     """Remove R # comments, handling basic string literal detection."""
     in_single = False
@@ -261,21 +320,37 @@ def _resolve_paste0(line: str, vars_map: dict[str, str]) -> list[str]:
 
 
 def _resolve_sprintf(line: str, vars_map: dict[str, str]) -> list[str]:
-    """Resolve sprintf("template/%s/file.csv", literal_or_var) single-substitution."""
+    """Resolve sprintf("template/%s/%s/file.csv", arg1, arg2, ...) with multiple placeholders."""
     results = []
     for m in _SPRINTF_RE.finditer(line):
         template = m.group(1) or m.group(2)
-        arg = (m.group(3) or '').strip()
-        if template.count('%s') == 1:
-            # Resolve the substitution arg
+        args_text = (m.group(3) or '').strip()
+        # Count total format specifiers (%s, %d, %f, %i, %g)
+        placeholders = re.findall(r'%[sdfig]', template)
+        if not placeholders:
+            continue
+        # Split args by comma, resolve each
+        raw_args = [a.strip() for a in args_text.split(',')]
+        if len(raw_args) < len(placeholders):
+            continue  # not enough args
+        subs = []
+        ok = True
+        for i, ph in enumerate(placeholders):
+            arg = raw_args[i] if i < len(raw_args) else ''
             quoted_m = _QUOTED_RE.match(arg)
             if quoted_m:
-                sub = quoted_m.group(1) or quoted_m.group(2)
+                subs.append(quoted_m.group(1) or quoted_m.group(2))
             elif arg in vars_map:
-                sub = vars_map[arg]
+                subs.append(vars_map[arg])
             else:
-                continue  # unresolvable
-            results.append(template.replace('%s', sub, 1))
+                ok = False
+                break
+        if not ok:
+            continue
+        result = template
+        for sub in subs:
+            result = re.sub(r'%[sdfig]', sub, result, count=1)
+        results.append(result)
     return results
 
 
@@ -317,17 +392,27 @@ def _preprocess_helpers(line: str, vars_map: dict[str, str]) -> tuple[str, list[
 
     def replace_sprintf(m: re.Match[str]) -> str:
         template = m.group(1) or m.group(2)
-        arg = (m.group(3) or '').strip()
-        if template.count('%s') == 1:
+        args_text = (m.group(3) or '').strip()
+        placeholders = re.findall(r'%[sdfig]', template)
+        if not placeholders:
+            return m.group(0)
+        raw_args = [a.strip() for a in args_text.split(',')]
+        if len(raw_args) < len(placeholders):
+            return m.group(0)
+        subs = []
+        for i, _ in enumerate(placeholders):
+            arg = raw_args[i] if i < len(raw_args) else ''
             quoted_m = _QUOTED_RE.match(arg)
             if quoted_m:
-                sub = quoted_m.group(1) or quoted_m.group(2)
+                subs.append(quoted_m.group(1) or quoted_m.group(2))
             elif arg in vars_map:
-                sub = vars_map[arg]
+                subs.append(vars_map[arg])
             else:
                 return m.group(0)
-            return f'"{template.replace("%s", sub, 1)}"'
-        return m.group(0)
+        result = template
+        for sub in subs:
+            result = re.sub(r'%[sdfig]', sub, result, count=1)
+        return f'"{result}"'
 
     line = _HERE_RE.sub(replace_here, line)
     line = _FILEPATH_RE.sub(replace_filepath, line)
@@ -356,14 +441,70 @@ def parse_r_file(
     rel_script, _ = to_project_relative(project_root, r_file, normalization)
     rel_script = normalize_token(rel_script)
 
+    # Join multi-line function calls into single logical lines
+    joined_lines = _join_continued_lines(raw_lines)
+
     # --- Pre-pass: collect variable assignments ---
+    # Seed with the script's own directory (R's __file__ equivalents resolve to this)
     vars_map: dict[str, str] = {}
-    for line in raw_lines:
+    script_dir_str = str(r_file.parent).replace('\\', '/')
+    vars_map['__script_dir__'] = script_dir_str
+
+    # First pass: collect literal string assignments
+    for line in joined_lines:
         clean = _strip_comment(line)
         m = _VAR_ASSIGN_RE.match(clean)
         if m:
             val = m.group(2) if m.group(2) is not None else m.group(3)
             vars_map[m.group(1)] = val
+
+    # Second pass: resolve script-dir idioms and function-call RHS assignments
+    # Repeat a few times to handle chained assignments (script_path -> script_dir -> path)
+    for _iteration in range(3):
+        for line in joined_lines:
+            clean = _strip_comment(line)
+            # Pattern: var <- dirname(sys.frame(1)$ofile)  etc.
+            m = _SCRIPT_DIR_RE.match(clean)
+            if m:
+                vars_map[m.group(1)] = script_dir_str
+                continue
+            # Pattern: var <- getSrcFilename(...) — evaluates to the script's path
+            m = _GETSRCFILENAME_RE.match(clean)
+            if m:
+                vars_map[m.group(1)] = str(r_file).replace('\\', '/')
+                continue
+            # Pattern: var <- dirname(some_var) where some_var is already resolved
+            m_dir = re.match(r'^\s*(\w+)\s*(?:<-|=)\s*dirname\s*\(\s*(\w+)\s*\)', clean)
+            if m_dir:
+                src_var = m_dir.group(2)
+                if src_var in vars_map:
+                    from pathlib import PurePosixPath
+                    vars_map[m_dir.group(1)] = str(PurePosixPath(vars_map[src_var]).parent)
+                continue
+            # Pattern: var <- paste0(...)  — store resolved value
+            m_assign = re.match(r'^\s*(\w+)\s*(?:<-|=)\s*(paste0\s*\()', clean)
+            if m_assign:
+                paste_start = clean.index('paste0')
+                resolved_list = _resolve_paste0(clean[paste_start:], vars_map)
+                if resolved_list:
+                    vars_map[m_assign.group(1)] = resolved_list[0]
+                continue
+            # Pattern: var <- sprintf(...)  — store resolved value
+            m_assign2 = re.match(r'^\s*(\w+)\s*(?:<-|=)\s*(sprintf\s*\()', clean)
+            if m_assign2:
+                sp_start = clean.index('sprintf')
+                resolved_list = _resolve_sprintf(clean[sp_start:], vars_map)
+                if resolved_list:
+                    vars_map[m_assign2.group(1)] = resolved_list[0]
+                continue
+            # Pattern: var <- file.path(...)  — store resolved value
+            m_assign3 = re.match(r'^\s*(\w+)\s*(?:<-|=)\s*(file\.path\s*\()', clean, re.I)
+            if m_assign3:
+                fp_start = clean.lower().index('file.path')
+                resolved_list = _resolve_filepath(clean[fp_start:], vars_map)
+                if resolved_list:
+                    vars_map[m_assign3.group(1)] = resolved_list[0]
+                continue
 
     events: list[ParsedEvent] = []
     child_scripts: list[str] = []
@@ -413,7 +554,7 @@ def parse_r_file(
 
     all_write_patterns = _WRITES_DATA_THEN_PATH + _WRITES_KEYWORD
 
-    for line_no, raw_line in enumerate(raw_lines, start=1):
+    for line_no, raw_line in enumerate(joined_lines, start=1):
         line = _strip_comment(raw_line)
 
         # --- Script calls ---

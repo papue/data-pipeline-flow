@@ -20,14 +20,38 @@ _COMMENT_RE = re.compile(r'#.*$')
 
 # ---------------------------------------------------------------------------
 # Patterns: variable assignment  VAR = "value"  or  VAR = 'value'
-# Also matches raw strings:  VAR = r"C:\path\to\dir"
+# Also matches raw strings:  VAR = r"C:\path\to\dir"  or  b"..."
 # ---------------------------------------------------------------------------
-_VAR_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(?:r?"([^"]*)"|r?\'([^\']*)\')\s*$')
+_VAR_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*=\s*(?:[rRbBuU]?"([^"]*)"|[rRbBuU]?\'([^\']*)\')\s*$')
+
+# ---------------------------------------------------------------------------
+# Pattern: VAR = Path("literal")  (pathlib.Path wrapping a literal string)
+# ---------------------------------------------------------------------------
+_VAR_PATH_ASSIGN_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(?:pathlib\.)?Path\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*\)\s*$'
+)
 
 # ---------------------------------------------------------------------------
 # Pattern: VAR = os.path.join(...)  assignment
 # ---------------------------------------------------------------------------
 _VAR_OSPATH_JOIN_RE = re.compile(r'^\s*(\w+)\s*=\s*os\.path\.join\s*\(([^)]+)\)')
+
+# ---------------------------------------------------------------------------
+# Pattern: VAR = "{}/...".format(other_var)  or  VAR = "%s/..." % other_var
+# ---------------------------------------------------------------------------
+_VAR_FORMAT_METHOD_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')\.format\s*\((\w+)\)'
+)
+_VAR_PERCENT_FORMAT_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')(?:\s*%\s*)(\w+)'
+)
+
+# ---------------------------------------------------------------------------
+# Pattern: VAR = other_var + "suffix"  or  VAR = "prefix" + other_var
+# ---------------------------------------------------------------------------
+_VAR_CONCAT_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(\w+)\s*\+\s*(?:"([^"]*)"|\'([^\']*)\')$'
+)
 
 # ---------------------------------------------------------------------------
 # Pattern: f-string with a known file extension (lower priority, produces
@@ -80,14 +104,49 @@ _PATH_DIV_RE = re.compile(
 _OSPATH_JOIN_RE = re.compile(r'\bos\.path\.join\s*\(([^)]+)\)')
 
 # ---------------------------------------------------------------------------
-# Quoted string anywhere (single or double)
+# Quoted string anywhere (single or double); also raw/byte prefixed strings
 # ---------------------------------------------------------------------------
-_QUOTED_RE = re.compile(r'(?:"([^"\\]+)"|\'([^\'\\]+)\')')
+_QUOTED_RE = re.compile(r'(?:[rRbBuU]?"([^"\\]+)"|[rRbBuU]?\'([^\'\\]+)\')')
+
+# ---------------------------------------------------------------------------
+# Pre-processor: strip r/b/u/R/B prefix from string literals so all
+# subsequent patterns can match unadorned "..." and '...' strings.
+# ---------------------------------------------------------------------------
+_RAW_STR_PREFIX_RE = re.compile(r'\b([rRbBuU])((?:"[^"]*"|\'[^\']*\'))')
 
 # ---------------------------------------------------------------------------
 # External reference filter
 # ---------------------------------------------------------------------------
 _EXTERNAL_PREFIXES = ('http://', 'https://', 'ftp://', 's3://', 'gs://')
+
+# ---------------------------------------------------------------------------
+# __file__-based variable resolution patterns
+# ---------------------------------------------------------------------------
+# VAR = os.path.dirname(os.path.abspath(__file__))  or  os.path.dirname(__file__)
+_DIRNAME_FILE_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*os\.path\.dirname\s*\(\s*(?:os\.path\.abspath\s*\(\s*)?__file__\s*\)?',
+)
+# VAR = Path(__file__)[.resolve()][.parent]* [/ "literal"]*
+# Handles: Path(__file__).parent, Path(__file__).resolve().parent.parent / "data", etc.
+_PATH_FILE_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(?:pathlib\.)?Path\s*\(\s*__file__\s*\)'
+    r'((?:\.resolve\(\)|\.parent)*)'
+    r'((?:\s*/\s*(?:"[^"]+"|\'[^\']+\'))*)\s*$'
+)
+# VAR = other_pathlib_var[.parent]* [/ "literal"]*
+_PATHLIB_CHAIN_RE = re.compile(
+    r'^\s*(\w+)\s*=\s*(\w+)((?:\.parent|\.resolve\(\))*)'
+    r'((?:\s*/\s*(?:"[^"]+"|\'[^\']+\'))*)\s*$'
+)
+# Inline Path("a") / "b" [/ "c"]* (after variable expansion) — one or more divisions
+_PATH_DIV_INLINE_RE = re.compile(
+    r'\bPath\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*\)\s*(?:/\s*(?:"[^"]+"|\'[^\']+\')\s*)+'
+)
+# Inline "a" + "b"  string concatenation (after variable expansion)
+_STR_CONCAT_INLINE_RE = re.compile(r'"([^"]*?)"\s*\+\s*"([^"]*?)"')
+# Inline "a" / "b" [/ "c"]*  path division (after variable expansion replaces pathlib vars)
+# This handles cases like: pd.read_csv("data" / "input.csv") after expansion
+_STR_DIV_INLINE_RE = re.compile(r'"([^"]*?)"\s*(?:/\s*"[^"]*?"\s*)+')
 
 # ---------------------------------------------------------------------------
 # F-string resolution patterns
@@ -120,7 +179,7 @@ def _make_read_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[str]]
     for fn_name, cmd in read_fns:
         for prefix in prefixes:
             pat = re.compile(
-                rf'\b{re.escape(prefix)}\.{re.escape(fn_name)}\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')',
+                rf'\b{re.escape(prefix)}\.{re.escape(fn_name)}\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')',
                 re.I,
             )
             patterns.append((cmd, pat))
@@ -133,7 +192,7 @@ def _make_np_read_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[st
         for fn in ('load', 'loadtxt', 'genfromtxt'):
             patterns.append((
                 f'np_{fn}',
-                re.compile(rf'\b{re.escape(prefix)}\.{re.escape(fn)}\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+                re.compile(rf'\b{re.escape(prefix)}\.{re.escape(fn)}\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
             ))
     return patterns
 
@@ -144,18 +203,18 @@ def _make_gpd_read_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[s
     for prefix in prefixes:
         patterns.append((
             'gpd_read_file',
-            re.compile(rf'\b{re.escape(prefix)}\.read_file\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+            re.compile(rf'\b{re.escape(prefix)}\.read_file\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
         ))
     return patterns
 
 
 # Fixed patterns that don't depend on aliases
 _FIXED_READ_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ('open_read',     re.compile(r'\bopen\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*(?:,\s*(?:"r[bt]?"|\'r[bt]?\'))?', re.I)),
-    ('pickle_load',   re.compile(r'\bpickle\.load\s*\(\s*open\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
-    ('json_load',     re.compile(r'\bjson\.load\s*\(\s*open\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
-    ('yaml_safe_load',re.compile(r'\byaml\.(?:safe_load|load)\s*\(\s*open\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
-    ('joblib_load',   re.compile(r'\bjoblib\.load\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('open_read',     re.compile(r'\bopen\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')\s*(?:,\s*(?:[rRbBuU]?"r[bt]?"|[rRbBuU]?\'r[bt]?\'))?', re.I)),
+    ('pickle_load',   re.compile(r'\bpickle\.load\s*\(\s*open\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
+    ('json_load',     re.compile(r'\bjson\.load\s*\(\s*open\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
+    ('yaml_safe_load',re.compile(r'\byaml\.(?:safe_load|load)\s*\(\s*open\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
+    ('joblib_load',   re.compile(r'\bjoblib\.load\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
 ]
 
 # Default pandas/numpy alias patterns (used when no custom alias detected)
@@ -184,7 +243,7 @@ def _make_write_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[str]
         # .to_csv("path") — method call, may have any object before the dot
         patterns.append((
             cmd,
-            re.compile(rf'\.{re.escape(fn_name)}\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+            re.compile(rf'\.{re.escape(fn_name)}\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
         ))
     return patterns
 
@@ -194,7 +253,7 @@ def _make_plt_write_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[
     for prefix in prefixes:
         patterns.append((
             'savefig',
-            re.compile(rf'\b{re.escape(prefix)}\.savefig\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+            re.compile(rf'\b{re.escape(prefix)}\.savefig\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
         ))
     return patterns
 
@@ -205,24 +264,24 @@ def _make_np_write_patterns(prefixes: list[str]) -> list[tuple[str, re.Pattern[s
         for fn in ('save', 'savetxt', 'savez', 'savez_compressed'):
             patterns.append((
                 f'np_{fn}',
-                re.compile(rf'\b{re.escape(prefix)}\.{re.escape(fn)}\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+                re.compile(rf'\b{re.escape(prefix)}\.{re.escape(fn)}\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
             ))
     return patterns
 
 
 _FIXED_WRITE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # .savefig("path") — method call (e.g. fig.savefig)
-    ('savefig',       re.compile(r'\.savefig\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('savefig',       re.compile(r'\.savefig\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
     # open("path", "w"/"wb"/"a"/"ab")
-    ('open_write',    re.compile(r'\bopen\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*,\s*(?:"[wa][bt]?"|\'[wa][bt]?\')', re.I)),
+    ('open_write',    re.compile(r'\bopen\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')\s*,\s*(?:[rRbBuU]?"[wa][bt]?"|[rRbBuU]?\'[wa][bt]?\')', re.I)),
     # pickle.dump(obj, open("path", "wb"))
-    ('pickle_dump',   re.compile(r'\bpickle\.dump\s*\([^,]+,\s*open\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('pickle_dump',   re.compile(r'\bpickle\.dump\s*\([^,]+,\s*open\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
     # json.dump(obj, open("path", "w"))
-    ('json_dump',     re.compile(r'\bjson\.dump\s*\([^,]+,\s*open\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('json_dump',     re.compile(r'\bjson\.dump\s*\([^,]+,\s*open\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
     # joblib.dump(obj, "path")
-    ('joblib_dump',   re.compile(r'\bjoblib\.dump\s*\([^,]+,\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('joblib_dump',   re.compile(r'\bjoblib\.dump\s*\([^,]+,\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
     # .save("path") — method call (folium, networkx, etc.)
-    ('save_method',   re.compile(r'\.save\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I)),
+    ('save_method',   re.compile(r'\.save\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I)),
 ]
 
 _DEFAULT_WRITE_PATTERNS = _make_write_patterns([])  # method patterns don't need a prefix
@@ -335,7 +394,16 @@ def _resolve_ospath_join(
             return None, False  # unresolvable
     if not parts:
         return None, contained_absolute
-    return '/'.join(parts), contained_absolute
+    raw_joined = '/'.join(parts)
+    # Normalize ".." segments so "analysis/../results" becomes "results"
+    norm_parts: list[str] = []
+    for seg in raw_joined.split('/'):
+        if seg == '..':
+            if norm_parts:
+                norm_parts.pop()
+        elif seg and seg != '.':
+            norm_parts.append(seg)
+    return '/'.join(norm_parts) if norm_parts else '.', contained_absolute
 
 
 def _extract_fstring_placeholder(raw_fstring: str) -> str | None:
@@ -439,7 +507,7 @@ def _build_dynamic_read_patterns(
     for fn in direct_fn_names & direct_read_fns:
         extra.append((
             fn,
-            re.compile(rf'\b{re.escape(fn)}\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')', re.I),
+            re.compile(rf'\b{re.escape(fn)}\s*\(\s*(?:[rRbBuU]?"([^"]+)"|[rRbBuU]?\'([^\']+)\')', re.I),
         ))
 
     return extra
@@ -479,12 +547,72 @@ def parse_python_file(
     rel_script, _ = to_project_relative(project_root, py_file, normalization)
     rel_script = normalize_token(rel_script)
 
+    # --- Pre-pass 0: join continuation lines (multi-line parenthesised expressions) ---
+    # This allows os.path.join(...) and Path(...) expressions that span multiple
+    # lines to be matched by single-line regexes.
+    joined_lines: list[str] = []
+    _pending = ''
+    _open_parens = 0
+    for raw_line in raw_lines:
+        clean_cl = _strip_comment(raw_line)
+        _open_parens += clean_cl.count('(') - clean_cl.count(')')
+        if _open_parens > 0:
+            # continuation — accumulate
+            _pending += ' ' + clean_cl.strip()
+        else:
+            if _pending:
+                joined_lines.append(_pending + ' ' + clean_cl.strip())
+                _pending = ''
+                _open_parens = 0
+            else:
+                joined_lines.append(raw_line)
+    if _pending:
+        joined_lines.append(_pending)
+
+    # --- Pre-pass 0b: substitute known __file__-based and os.sep expressions ---
+    # Replace os.path.dirname(os.path.abspath(__file__)) and similar compound
+    # expressions with a placeholder variable name so that _resolve_ospath_join
+    # and other patterns can match them as simple variable references.
+    # We use the sentinel name __script_dir__ (unlikely to collide).
+    # Matches both:
+    #   os.path.dirname(__file__)
+    #   os.path.dirname(os.path.abspath(__file__))
+    # We need to match the complete expression including all closing parens.
+    _OSPATH_DIRNAME_FILE_EXPR = re.compile(
+        r'os\.path\.dirname\s*\(\s*os\.path\.abspath\s*\(\s*__file__\s*\)\s*\)'
+        r'|os\.path\.dirname\s*\(\s*__file__\s*\)'
+    )
+    _OSSEP_RE = re.compile(r'\bos\.sep\b')
+    _joined_lines_sub: list[str] = []
+    for _jl in joined_lines:
+        _jl = _OSPATH_DIRNAME_FILE_EXPR.sub('__script_dir__', _jl)
+        _jl = _OSSEP_RE.sub('"/"', _jl)  # treat os.sep as "/" for path resolution
+        _joined_lines_sub.append(_jl)
+    joined_lines = _joined_lines_sub
+
     # --- Pre-pass 1: collect variable assignments ---
     # Two sub-passes so that joined-path vars can reference already-resolved vars.
     vars_map: dict[str, str] = {}
     abs_vars: set[str] = set()  # variable names whose values are absolute paths
+
+    # Seed __file__ with the script's absolute path so os.path.dirname/__file__
+    # and Path(__file__) expressions can be resolved.
+    vars_map['__file__'] = str(py_file).replace('\\', '/')
+    abs_vars.add('__file__')
+    # os.sep is always treated as '/' for path resolution purposes
+    # (paths are normalised to forward slashes throughout the tool).
+    # We can't add 'os.sep' directly as a var name (contains a dot) so we
+    # pre-substitute it in the joined_lines below.
+    # __script_dir__ is our internal sentinel for os.path.dirname(os.path.abspath(__file__))
+    # (substituted in joined_lines above).  It holds the project-relative folder.
+    _script_dir_for_vars = str(py_file.parent.relative_to(project_root)).replace('\\', '/')
+    if _script_dir_for_vars == '.':
+        _script_dir_for_vars = ''
+    vars_map['__script_dir__'] = _script_dir_for_vars if _script_dir_for_vars else '.'
+
     # Sub-pass 1a: plain string literals  VAR = "value"  or  VAR = r"value"
-    for line in raw_lines:
+    _VAR_ASSIGN_SENTINEL_RE = re.compile(r'^\s*(\w+)\s*=\s*__script_dir__\s*$')
+    for line in joined_lines:
         clean = _strip_comment(line)
         m = _VAR_ASSIGN_RE.match(clean)
         if m:
@@ -492,17 +620,153 @@ def parse_python_file(
             vars_map[m.group(1)] = val
             if _is_absolute_like(val):
                 abs_vars.add(m.group(1))
+        # VAR = Path("literal")
+        m2 = _VAR_PATH_ASSIGN_RE.match(clean)
+        if m2:
+            val = m2.group(2) if m2.group(2) is not None else m2.group(3)
+            vars_map[m2.group(1)] = val
+        # VAR = __script_dir__  (after pre-pass substitution)
+        m3 = _VAR_ASSIGN_SENTINEL_RE.match(clean)
+        if m3:
+            vars_map[m3.group(1)] = vars_map['__script_dir__']
+
     # Sub-pass 1b: VAR = os.path.join(...)  where components resolve from vars_map
-    for line in raw_lines:
+    # Run on joined_lines so multi-line joins are captured.
+    # Also handles VAR = os.path.join(...) + "suffix" (e.g. + "/" for trailing sep).
+    _VAR_OSPATH_JOIN_PLUS_RE = re.compile(
+        r'^\s*(\w+)\s*=\s*os\.path\.join\s*\(([^)]+)\)\s*\+\s*(?:"([^"]*)"|\'([^\']*)\')'
+    )
+    for line in joined_lines:
         clean = _strip_comment(line)
+        m_plus = _VAR_OSPATH_JOIN_PLUS_RE.match(clean)
+        if m_plus:
+            var_name = m_plus.group(1)
+            jpath, _abs = _resolve_ospath_join(clean, vars_map, abs_vars)
+            if jpath is not None:
+                suffix = m_plus.group(3) if m_plus.group(3) is not None else m_plus.group(4)
+                vars_map[var_name] = jpath + suffix
+                if _abs:
+                    abs_vars.add(var_name)
+            continue
         m = _VAR_OSPATH_JOIN_RE.match(clean)
         if m:
             var_name = m.group(1)
-            joined, _abs = _resolve_ospath_join(clean, vars_map, abs_vars)
-            if joined is not None:
-                vars_map[var_name] = joined
+            jpath, _abs = _resolve_ospath_join(clean, vars_map, abs_vars)
+            if jpath is not None:
+                vars_map[var_name] = jpath
                 if _abs:
                     abs_vars.add(var_name)
+
+    # Sub-pass 1c: VAR = "{}/...".format(other)  and  VAR = "%s/..." % other
+    for line in joined_lines:
+        clean = _strip_comment(line)
+        m = _VAR_FORMAT_METHOD_RE.match(clean)
+        if m:
+            var_name = m.group(1)
+            template = m.group(2) if m.group(2) is not None else m.group(3)
+            arg_var = m.group(4)
+            if arg_var in vars_map and arg_var not in abs_vars:
+                resolved = template.replace('{}', vars_map[arg_var], 1)
+                vars_map[var_name] = resolved
+        m2 = _VAR_PERCENT_FORMAT_RE.match(clean)
+        if m2:
+            var_name = m2.group(1)
+            template = m2.group(2) if m2.group(2) is not None else m2.group(3)
+            arg_var = m2.group(4)
+            if arg_var in vars_map and arg_var not in abs_vars:
+                resolved = template.replace('%s', vars_map[arg_var], 1)
+                vars_map[var_name] = resolved
+
+    # Sub-pass 1d: VAR = other_var + "suffix"
+    for line in joined_lines:
+        clean = _strip_comment(line)
+        m = _VAR_CONCAT_RE.match(clean)
+        if m:
+            var_name = m.group(1)
+            base_var = m.group(2)
+            suffix = m.group(3) if m.group(3) is not None else m.group(4)
+            if base_var in vars_map and base_var not in abs_vars:
+                vars_map[var_name] = vars_map[base_var] + suffix
+
+    # Sub-pass 1e: resolve __file__-based path variables
+    # Patterns handled:
+    #   VAR = os.path.dirname(os.path.abspath(__file__))
+    #   VAR = os.path.dirname(__file__)
+    #   VAR = Path(__file__) / then .parent chains tracked via pathlib_vars
+    # We represent script_dir as the project-relative folder of the script.
+    _script_dir_rel = str(py_file.parent.relative_to(project_root)).replace('\\', '.')
+    # Normalise to forward-slash relative path; '.' means project root
+    _script_dir_rel = str(py_file.parent.relative_to(project_root)).replace('\\', '/')
+    if _script_dir_rel == '.':
+        _script_dir_rel = ''
+
+    # Track Path objects (pathlib vars) — map varname -> Path object
+    pathlib_vars: dict[str, Path] = {}
+
+    for line in joined_lines:
+        clean = _strip_comment(line)
+        m = _DIRNAME_FILE_RE.match(clean)
+        if m:
+            var_name = m.group(1)
+            vars_map[var_name] = _script_dir_rel if _script_dir_rel else '.'
+        m2 = _PATH_FILE_RE.match(clean)
+        if m2:
+            var_name = m2.group(1)
+            chain = m2.group(2)   # e.g. ".resolve().parent.parent"
+            divs = m2.group(3)    # e.g. ' / "data"'
+            current_path = py_file
+            for part in re.findall(r'\.(parent|resolve\(\))', chain):
+                if part == 'parent':
+                    current_path = current_path.parent
+            for div_lit in re.findall(r'(?:"([^"]+)"|\'([^\']+)\')', divs):
+                lit = div_lit[0] or div_lit[1]
+                current_path = current_path / lit
+            pathlib_vars[var_name] = current_path
+
+    # Resolve pathlib chains: VAR = other_pathlib_var[.parent]* [/ "literal"]*
+    # Keep iterating until no new vars are resolved.
+    changed = True
+    max_iter = 10
+    while changed and max_iter > 0:
+        changed = False
+        max_iter -= 1
+        for line in joined_lines:
+            clean = _strip_comment(line)
+            m = _PATHLIB_CHAIN_RE.match(clean)
+            if not m:
+                continue
+            var_name = m.group(1)
+            base_var = m.group(2)
+            chain = m.group(3)  # e.g. ".parent.parent"
+            divs = m.group(4)   # e.g. ' / "data"'
+            if base_var not in pathlib_vars:
+                continue
+            if var_name in pathlib_vars:
+                continue  # already resolved
+            current_path = pathlib_vars[base_var]
+            # Apply .parent and .resolve() calls
+            for part in re.findall(r'\.(parent|resolve\(\))', chain):
+                if part == 'parent':
+                    current_path = current_path.parent
+                # .resolve() — we keep as-is (already absolute)
+            # Apply / "literal" divisions
+            for div_lit in re.findall(r'(?:"([^"]+)"|\'([^\']+)\')', divs):
+                lit = div_lit[0] or div_lit[1]
+                current_path = current_path / lit
+            pathlib_vars[var_name] = current_path
+            changed = True
+
+    # For each resolved pathlib var, add it to vars_map as a relative path
+    for var_name, p in pathlib_vars.items():
+        if var_name == '__file__':
+            continue
+        try:
+            rel = p.resolve().relative_to(project_root.resolve())
+            vars_map[var_name] = str(rel).replace('\\', '/')
+        except ValueError:
+            # Not under project_root — store absolute for os.path.join usage
+            vars_map[var_name] = str(p).replace('\\', '/')
+            abs_vars.add(var_name)
 
     # --- Pre-pass 2: collect import aliases ---
     lib_aliases, direct_fn_names = _collect_aliases(raw_lines)
@@ -647,21 +911,69 @@ def parse_python_file(
         # Skip absolute-path variables: they are only useful inside os.path.join
         # (handled above) and expanding them would insert Windows paths with
         # backslashes that confuse _QUOTED_RE and other patterns.
+        # However, we also expand abs_vars at read/write call sites (marked
+        # force_abs so the diagnostic is emitted).
+        _line_has_abs_var = False
         for _var, _val in vars_map.items():
             if _var in abs_vars:
+                # Only expand abs vars if they appear as a call argument (bare
+                # identifier inside a read/write call), not at assignment sites.
+                # We detect this by checking if the var appears in read/write
+                # function call syntax: fn_name(var  or  fn_name(var,
+                if re.search(rf'\(\s*{re.escape(_var)}\s*[,)]', line) or re.search(rf'\(\s*{re.escape(_var)}\s*$', line):
+                    _line_has_abs_var = True
+                    _quoted_val = f'"{_val}"'
+                    line = re.sub(rf'\b{re.escape(_var)}\b', lambda _m, _r=_quoted_val: _r, line)
                 continue
             # Use a lambda so backslashes in _val are treated as literals, not
             # regex replacement escape sequences (e.g. C:\Users would be \U...).
             _quoted_val = f'"{_val}"'
             line = re.sub(rf'\b{re.escape(_var)}\b', lambda _m, _r=_quoted_val: _r, line)
+        _join_force_abs = _join_force_abs or _line_has_abs_var
 
-        # --- Path helper: Path("a") / "b" ---
-        for path_div_result in _resolve_path_div(line, vars_map):
-            # We can't know read vs write from the Path() expression alone;
-            # these typically appear as arguments to read/write functions,
-            # so they'll be picked up by subsequent patterns below.
-            # Replace the Path(...) / "..." expression with its resolved string.
-            pass  # handled by substituting in subsequent patterns below
+        # --- String division: "a" / "b" [/ "c"]* -> "a/b/c" (inline, after expansion) ---
+        # Handles pd.read_csv(BASE / "input.csv") after BASE is expanded to "data"
+        # Repeatedly apply to handle multi-segment chains.
+        for _ in range(5):  # up to 5 passes for deep nesting
+            _sdm = _STR_DIV_INLINE_RE.search(line)
+            if not _sdm:
+                break
+            _full = _sdm.group(0)
+            _base = _sdm.group(1)
+            _divs = re.findall(r'/\s*"([^"]*?)"', _full)
+            _resolved = '/'.join([_base] + _divs).replace('//', '/').replace('/./', '/')
+            # Normalise ".." segments
+            _parts = []
+            for seg in _resolved.split('/'):
+                if seg == '..':
+                    if _parts:
+                        _parts.pop()
+                elif seg and seg != '.':
+                    _parts.append(seg)
+            _resolved = '/'.join(_parts)
+            line = line.replace(_full, f'"{_resolved}"', 1)
+
+        # --- String concatenation: "a" + "b" -> "ab" (inline, after variable expansion) ---
+        # Handles pd.read_csv(base + "suffix") after base is expanded to "data/"
+        for _cm in _STR_CONCAT_INLINE_RE.finditer(line):
+            _concat_result = _cm.group(1) + _cm.group(2)
+            line = line.replace(_cm.group(0), f'"{_concat_result}"', 1)
+
+        # --- Path helper: Path("a") / "b" [/ "c"]* (inline, after variable expansion) ---
+        # After variable expansion, Path(var) becomes Path("resolved_val").
+        # _PATH_DIV_INLINE_RE matches the full Path("a") / "b" / "c" expression.
+        for _pdm in _PATH_DIV_INLINE_RE.finditer(line):
+            _full_match = _pdm.group(0)
+            # Extract base from Path("base")
+            _base_m = re.match(r'\bPath\s*\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*\)', _full_match)
+            if _base_m:
+                _base = _base_m.group(1) or _base_m.group(2)
+                # Extract all / "literal" parts after the Path(...)
+                _suffix_parts = re.findall(r'/\s*(?:"([^"]+)"|\'([^\']+)\')', _full_match)
+                _parts = [_base] + [p[0] or p[1] for p in _suffix_parts]
+                _resolved = '/'.join(_parts)
+                line = line.replace(_full_match, f'"{_resolved}"', 1)
+                break  # one substitution per line
 
         # --- Read patterns ---
         read_matched = False
