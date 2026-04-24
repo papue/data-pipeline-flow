@@ -30,3 +30,6 @@ example/output/
 
 # Claude Code working files
 .claude/
+
+# Task planning files (local only)
+tasks/
